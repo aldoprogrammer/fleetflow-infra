@@ -4,9 +4,9 @@ services:
     container_name: fleetflow-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: fleetflow
-      POSTGRES_PASSWORD: fleetflow_local_secret
-      POSTGRES_DB: fleetflow
+      POSTGRES_USER: ${POSTGRES_USER:-fleetflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleetflow_local_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-fleetflow}
       POSTGRES_INITDB_ARGS: "--data-checksums"
     ports:
       - "5432:5432"
@@ -14,7 +14,7 @@ services:
       - fleetflow_postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fleetflow -d fleetflow"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleetflow} -d ${POSTGRES_DB:-fleetflow}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -73,7 +73,9 @@ services:
           cpus: "0.1"
           memory: 128M
 
+  # Optional: only start when running API inside Docker (not for local `pnpm start:dev`)
   fleetflow-api:
+    profiles: ["docker-api"]
     image: node:20-alpine
     container_name: fleetflow-api
     restart: unless-stopped
