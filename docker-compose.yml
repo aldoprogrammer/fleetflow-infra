@@ -1,0 +1,201 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fleetflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fleetflow
+      POSTGRES_PASSWORD: fleetflow_local_secret
+      POSTGRES_DB: fleetflow
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5432:5432"
+    volumes:
+      - fleetflow_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetflow -d fleetflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - fleetflow-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - wal_level=replica
+      - -c
+      - hot_standby=on
+
+  redis:
+    image: redis:7-alpine
+    container_name: fleetflow-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - fleetflow_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - fleetflow-net
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  fleetflow-api:
+    image: node:20-alpine
+    container_name: fleetflow-api
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+      DATABASE_URL: postgresql://fleetflow:fleetflow_local_secret@postgres:5432/fleetflow?schema=public
+      REDIS_URL: redis://redis:6379
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      STRIPE_SECRET_KEY: sk_test_fleetflow_local_placeholder
+      MATCHING_SERVICE_URL: http://python-matching-service:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../fleetflow-api:/app
+      - ../fleetflow-shared:/fleetflow-shared
+      - fleetflow_api_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      python-matching-service:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/health/live || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - fleetflow-net
+    command:
+      - sh
+      - -c
+      - |
+        echo "FleetFlow API container stub ready. Mount NestJS sources and run: pnpm install && pnpm run start:dev"
+        tail -f /dev/null
+
+  python-matching-service:
+    image: python:3.12-slim
+    container_name: fleetflow-matching
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MATCHING_HOST: "0.0.0.0"
+      MATCHING_PORT: "8000"
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://fleetflow:fleetflow_local_secret@postgres:5432/fleetflow
+      GEO_RADIUS_KM: "8"
+      MAX_CANDIDATES: "25"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./matching:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - fleetflow-net
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir fastapi==0.115.6 uvicorn==0.34.0 redis==5.2.1 psycopg[binary]==3.2.3
+        python - <<'PY'
+        from fastapi import FastAPI
+        import uvicorn
+
+        app = FastAPI(title="FleetFlow Matching Service", version="1.0.0")
+
+        @app.get("/health")
+        def health():
+            return {"status": "ok", "service": "python-matching-service"}
+
+        @app.post("/v1/match")
+        def match(payload: dict):
+            order_id = payload.get("orderId", "unknown")
+            return {
+                "orderId": order_id,
+                "candidates": [
+                    {
+                        "driverId": "550e8400-e29b-41d4-a716-446655440010",
+                        "score": 0.92,
+                        "etaMinutes": 18,
+                        "distanceKm": 2.4,
+                    }
+                ],
+                "algorithm": "geo-capacity-v1",
+            }
+
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+        PY
+
+networks:
+  fleetflow-net:
+    driver: bridge
+    name: fleetflow-net
+
+volumes:
+  fleetflow_postgres_data:
+    name: fleetflow_postgres_data
+  fleetflow_redis_data:
+    name: fleetflow_redis_data
+  fleetflow_api_node_modules:
+    name: fleetflow_api_node_modules
